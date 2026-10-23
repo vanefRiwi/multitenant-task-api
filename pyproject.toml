@@ -1,0 +1,71 @@
+[project]
+name = "multitenant-task-api"
+version = "1.0.0"
+description = "API RESTful multitenant de gestión de tareas (FastAPI + SQLModel + PostgreSQL, una base de datos por organización)"
+readme = "README.md"
+authors = [
+    { name = "vanefRiwi", email = "125419162+vanefRiwi@users.noreply.github.com" }
+]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "alembic>=1.20.1",
+    "boto3>=1.43.118",
+    "fastapi>=0.161.1",
+    "mangum>=0.22.0",
+    "psycopg[binary]>=3.3.6",
+    "pwdlib[argon2]>=0.3.1",
+    "pydantic-settings>=2.16.1",
+    "pydantic[email]>=2.14.1",
+    "pyjwt>=2.15.1",
+    "sqlmodel>=0.0.48",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.0,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "app"
+
+[dependency-groups]
+dev = [
+    "boto3-stubs[secretsmanager]>=1.43.118",
+    "httpx>=0.28.1",
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.2",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM", "RUF"]
+ignore = [
+    "B008",  # FastAPI usa Depends(...) como valor por defecto
+    "S105",  # falsos positivos con nombres como token_type o secret_provider
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]
+"migrations/**" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["app"]
+mypy_path = "src"
+ignore_missing_imports = true
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "-ra"
+filterwarnings = ["ignore::DeprecationWarning:fastapi.testclient"]
+markers = [
+    "integration: pruebas contra PostgreSQL real",
+]

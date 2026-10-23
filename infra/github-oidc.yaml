@@ -1,0 +1,197 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Confianza OIDC entre GitHub Actions y AWS para multitenant-task-api. Crea el proveedor
+  OIDC de GitHub (opcional) y un rol de despliegue por ambiente. Se despliega UNA vez a mano:
+    aws cloudformation deploy --template-file infra/github-oidc.yaml \
+      --stack-name multitenant-task-api-github-oidc --capabilities CAPABILITY_NAMED_IAM \
+      --parameter-overrides GitHubOwner=vanefRiwi RepositoryName=multitenant-task-api
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Default: vanefRiwi
+  RepositoryName:
+    Type: String
+    Default: multitenant-task-api
+  CreateOidcProvider:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: Pon "false" si tu cuenta ya tiene el proveedor token.actions.githubusercontent.com.
+
+Conditions:
+  ShouldCreateProvider: !Equals [!Ref CreateOidcProvider, "true"]
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+
+  # Permisos que necesita `sam deploy` para crear/actualizar el stack de la API.
+  # Están acotados por nombre (multitenant-task-api-*) donde AWS lo permite.
+  DeployPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: multitenant-task-api-deploy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CloudFormationStacks
+            Effect: Allow
+            Action: cloudformation:*
+            Resource:
+              - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/multitenant-task-api-*/*
+              - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/aws-sam-cli-managed-default/*
+              - arn:aws:cloudformation:*:aws:transform/Serverless-2016-10-31
+          - Sid: CloudFormationRead
+            Effect: Allow
+            Action:
+              - cloudformation:ValidateTemplate
+              - cloudformation:GetTemplateSummary
+              - cloudformation:ListStacks
+              - cloudformation:DescribeStacks
+            Resource: "*"
+          - Sid: SamArtifactsBucket
+            Effect: Allow
+            Action: s3:*
+            Resource:
+              - arn:aws:s3:::aws-sam-cli-managed-default-*
+              - arn:aws:s3:::aws-sam-cli-managed-default-*/*
+          - Sid: LambdaFunctions
+            Effect: Allow
+            Action: lambda:*
+            Resource: !Sub arn:aws:lambda:*:${AWS::AccountId}:function:multitenant-task-api-*
+          - Sid: LambdaRead
+            Effect: Allow
+            Action: [lambda:GetAccountSettings, lambda:ListFunctions]
+            Resource: "*"
+          - Sid: LambdaRoles
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:PassRole
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:GetRolePolicy
+              - iam:UpdateAssumeRolePolicy
+            # Solo los roles de las Lambdas de los stacks (no los roles de GitHub de abajo).
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/multitenant-task-api-staging-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/multitenant-task-api-production-*
+          - Sid: ServiceLinkedRoles
+            Effect: Allow
+            Action: iam:CreateServiceLinkedRole
+            Resource: "*"
+            Condition:
+              StringEquals:
+                iam:AWSServiceName:
+                  - rds.amazonaws.com
+                  - ops.apigateway.amazonaws.com
+          - Sid: NetworkAndDatabase
+            Effect: Allow
+            Action: [ec2:*, rds:*]
+            Resource: "*"
+          - Sid: Secrets
+            Effect: Allow
+            Action: secretsmanager:*
+            Resource:
+              - !Sub arn:aws:secretsmanager:*:${AWS::AccountId}:secret:multitenant-task-api/*
+              - !Sub arn:aws:secretsmanager:*:${AWS::AccountId}:secret:rds!*
+          - Sid: SecretsGlobal
+            Effect: Allow
+            Action: [secretsmanager:GetRandomPassword, secretsmanager:ListSecrets]
+            Resource: "*"
+          - Sid: KmsForRdsManagedSecret
+            Effect: Allow
+            Action: [kms:DescribeKey, kms:CreateGrant, kms:Decrypt, kms:GenerateDataKey]
+            Resource: "*"
+          - Sid: ApiGateway
+            Effect: Allow
+            Action: apigateway:*
+            Resource: arn:aws:apigateway:*::/*
+          - Sid: Certificates
+            Effect: Allow
+            Action: [acm:DescribeCertificate, acm:ListCertificates]
+            Resource: "*"
+          - Sid: Logs
+            Effect: Allow
+            Action: logs:*
+            Resource:
+              - !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/lambda/multitenant-task-api-*
+              - !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/apigateway/multitenant-task-api-*
+          - Sid: LogsDelivery
+            Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+              - logs:CreateLogDelivery
+              - logs:GetLogDelivery
+              - logs:UpdateLogDelivery
+              - logs:DeleteLogDelivery
+              - logs:ListLogDeliveries
+              - logs:PutResourcePolicy
+              - logs:DescribeResourcePolicies
+            Resource: "*"
+          - Sid: Monitoring
+            Effect: Allow
+            Action:
+              - cloudwatch:PutMetricAlarm
+              - cloudwatch:DeleteAlarms
+              - cloudwatch:DescribeAlarms
+              - cloudwatch:GetMetricStatistics
+              - cloudwatch:TagResource
+            Resource: "*"
+
+  # Solo los jobs del environment "staging" de ESTE repositorio pueden asumir este rol.
+  StagingDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: multitenant-task-api-github-staging
+      ManagedPolicyArns: [!Ref DeployPolicy]
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOwner}/${RepositoryName}:environment:staging
+
+  # Y este, solo los jobs del environment "production" (que exige aprobación manual).
+  ProductionDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: multitenant-task-api-github-production
+      ManagedPolicyArns: [!Ref DeployPolicy]
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOwner}/${RepositoryName}:environment:production
+
+Outputs:
+  StagingDeployRoleArn:
+    Description: Valor de AWS_DEPLOY_ROLE_ARN en el environment "staging" de GitHub
+    Value: !GetAtt StagingDeployRole.Arn
+  ProductionDeployRoleArn:
+    Description: Valor de AWS_DEPLOY_ROLE_ARN en el environment "production" de GitHub
+    Value: !GetAtt ProductionDeployRole.Arn

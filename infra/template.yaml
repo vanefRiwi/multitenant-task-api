@@ -1,0 +1,397 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Multitenant Task Management API - FastAPI en Lambda + API Gateway (HTTP API) +
+  RDS PostgreSQL (control_db + una base por tenant) + Secrets Manager + CloudWatch.
+
+# Un stack por ambiente: multitenant-task-api-staging y multitenant-task-api-production.
+# Cada uno tiene su propia VPC, RDS, secretos y Lambdas (recursos y credenciales independientes).
+
+Parameters:
+  Stage:
+    Type: String
+    AllowedValues: [staging, production]
+    Description: Ambiente que se despliega.
+  DomainName:
+    Type: String
+    Default: ""
+    Description: Dominio personalizado (p. ej. api.tudominio.com). Vacío = sin dominio propio.
+  CertificateArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:aws[a-zA-Z-]*:acm:[a-z0-9-]+:\\d{12}:certificate/.+$"
+    Description: ARN del certificado ACM (en la MISMA región del stack) para DomainName.
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/16
+    Description: Rango de IPs de la VPC del ambiente.
+  DBEngineVersion:
+    Type: String
+    Default: "16.15"
+    Description: >
+      Versión de PostgreSQL. Consulta las disponibles con:
+      aws rds describe-db-engine-versions --engine postgres --query "DBEngineVersions[].EngineVersion"
+  DBInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+  LambdaReservedConcurrency:
+    Type: Number
+    Default: 0
+    Description: >
+      Límite de ejecuciones simultáneas de la API (protege las conexiones de PostgreSQL).
+      0 = sin reserva (las cuentas nuevas suelen tener un límite total de 10 y no permiten reservar).
+  ThrottlingRateLimit:
+    Type: Number
+    Default: 50
+    Description: Peticiones por segundo permitidas en API Gateway.
+  ThrottlingBurstLimit:
+    Type: Number
+    Default: 100
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 180, 365]
+
+Conditions:
+  HasCustomDomain: !Not [!Equals [!Ref DomainName, ""]]
+  HasReservedConcurrency: !Not [!Equals [!Ref LambdaReservedConcurrency, 0]]
+  IsProduction: !Equals [!Ref Stage, production]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [x86_64]
+    MemorySize: 512
+    CodeUri: ../
+    VpcConfig:
+      SecurityGroupIds: [!Ref LambdaSecurityGroup]
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+    Environment:
+      Variables:
+        APP_ENV: !Ref Stage
+        LOG_LEVEL: INFO
+        SECRET_PROVIDER: aws
+        DB_HOST: !GetAtt Database.Endpoint.Address
+        DB_PORT: !GetAtt Database.Endpoint.Port
+        CONTROL_DB_NAME: control_db
+        CENTRAL_DB_SECRET_ARN: !Ref CentralDbSecret
+        PROVISIONER_DB_SECRET_ARN: !Ref ProvisionerDbSecret
+        JWT_SECRET_ARN: !Ref JwtSecret
+        JWT_ISSUER: !Sub multitenant-task-api-${Stage}
+        TENANT_SECRET_PREFIX: !Sub multitenant-task-api/${Stage}
+
+Resources:
+  # ---------------------------------------------------------------- Red (VPC privada)
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true # necesario para el endpoint privado de Secrets Manager
+      Tags: [{ Key: Name, Value: !Sub "multitenant-task-api-${Stage}" }]
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: !Sub "multitenant-task-api-${Stage}-private-a" }]
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags: [{ Key: Name, Value: !Sub "multitenant-task-api-${Stage}-private-b" }]
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Lambdas de la API y de operaciones
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, CidrIp: !Ref VpcCidr }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !Ref VpcCidr }
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL solo accesible desde las Lambdas
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Endpoint privado de Secrets Manager
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  # Las Lambdas no tienen salida a Internet (no hay NAT Gateway, que es caro). Llegan a
+  # Secrets Manager por este endpoint privado. Una sola subred para ahorrar costes en el MVP.
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.secretsmanager
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  # ---------------------------------------------------------------- Base de datos
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subredes privadas para RDS
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: postgres
+      EngineVersion: !Ref DBEngineVersion
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: postgres_admin
+      ManageMasterUserPassword: true # RDS genera la contraseña y la guarda en Secrets Manager
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups: [!Ref DatabaseSecurityGroup]
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: !If [IsProduction, 7, 1]
+      DeletionProtection: !If [IsProduction, true, false]
+      AutoMinorVersionUpgrade: true
+      EnablePerformanceInsights: false
+      Tags: [{ Key: app, Value: multitenant-task-api }]
+
+  # ---------------------------------------------------------------- Secretos
+  CentralDbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub multitenant-task-api/${Stage}/central-db
+      Description: Usuario de la API para control_db (solo DML)
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "app_central"}'
+        GenerateStringKey: password
+        PasswordLength: 40
+        ExcludePunctuation: true
+
+  ProvisionerDbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub multitenant-task-api/${Stage}/provisioner-db
+      Description: Usuario de provisión de tenants (CREATEDB, CREATEROLE)
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "tenant_provisioner"}'
+        GenerateStringKey: password
+        PasswordLength: 40
+        ExcludePunctuation: true
+
+  JwtSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub multitenant-task-api/${Stage}/jwt
+      Description: Clave de firma de los JWT
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+
+  # ---------------------------------------------------------------- API
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      DefaultRouteSettings:
+        ThrottlingRateLimit: !Ref ThrottlingRateLimit
+        ThrottlingBurstLimit: !Ref ThrottlingBurstLimit
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","method":"$context.httpMethod","path":"$context.path","status":"$context.status","latency":"$context.responseLatency","integrationError":"$context.integrationErrorMessage"}'
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      Description: FastAPI (Mangum) - API pública
+      Handler: app.handler.handler
+      Timeout: 29 # el máximo de API Gateway
+      ReservedConcurrentExecutions:
+        !If [HasReservedConcurrency, !Ref LambdaReservedConcurrency, !Ref AWS::NoValue]
+      Environment:
+        Variables:
+          EXPOSE_DOCS: "true"
+      Events:
+        Default:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+      Policies:
+        - VPCAccessPolicy: {}
+        - Statement:
+            - Sid: ReadOwnSecrets
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref CentralDbSecret
+                - !Ref ProvisionerDbSecret
+                - !Ref JwtSecret
+            - Sid: ManageTenantSecrets
+              Effect: Allow
+              Action:
+                - secretsmanager:CreateSecret
+                - secretsmanager:PutSecretValue
+                - secretsmanager:GetSecretValue
+                - secretsmanager:DescribeSecret
+                - secretsmanager:TagResource
+              Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:multitenant-task-api/${Stage}/tenants/*
+
+  # Lambda de operaciones (bootstrap y migraciones). No está conectada a API Gateway:
+  # solo el pipeline (o tú desde la consola/CLI) puede invocarla.
+  OpsFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      Description: Operaciones - bootstrap de control_db y migraciones de tenants
+      Handler: app.ops_handler.handler
+      Timeout: 300
+      Environment:
+        Variables:
+          ADMIN_DB_SECRET_ARN: !GetAtt Database.MasterUserSecret.SecretArn
+      Policies:
+        - VPCAccessPolicy: {}
+        - Statement:
+            - Sid: ReadOpsSecrets
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !GetAtt Database.MasterUserSecret.SecretArn
+                - !Ref CentralDbSecret
+                - !Ref ProvisionerDbSecret
+            - Sid: ManageTenantSecrets
+              Effect: Allow
+              Action:
+                - secretsmanager:CreateSecret
+                - secretsmanager:PutSecretValue
+                - secretsmanager:GetSecretValue
+                - secretsmanager:DescribeSecret
+                - secretsmanager:TagResource
+              Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:multitenant-task-api/${Stage}/tenants/*
+
+  # ---------------------------------------------------------------- Dominio propio
+  ApiDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Condition: HasCustomDomain
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W1030] # CertificateArn vacío solo cuando no hay dominio (Condition)
+    Properties:
+      DomainName: !Ref DomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref CertificateArn
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+
+  ApiDomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Condition: HasCustomDomain
+    DependsOn: HttpApiApiGatewayDefaultStage
+    Properties:
+      DomainName: !Ref ApiDomain
+      ApiId: !Ref HttpApi
+      Stage: $default
+
+  # ---------------------------------------------------------------- CloudWatch
+  ApiFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ApiFunction}
+      RetentionInDays: !Ref LogRetentionDays
+
+  OpsFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${OpsFunction}
+      RetentionInDays: !Ref LogRetentionDays
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/multitenant-task-api-${Stage}
+      RetentionInDays: !Ref LogRetentionDays
+
+  ApiFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub multitenant-task-api-${Stage}-lambda-errors
+      AlarmDescription: La Lambda de la API está fallando
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref ApiFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  Api5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub multitenant-task-api-${Stage}-5xx
+      AlarmDescription: API Gateway está devolviendo errores 5xx
+      Namespace: AWS/ApiGateway
+      MetricName: 5xx
+      Dimensions:
+        - { Name: ApiId, Value: !Ref HttpApi }
+        - { Name: Stage, Value: $default }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  ApiUrl:
+    Description: URL por defecto de API Gateway
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+  CustomDomainUrl:
+    Condition: HasCustomDomain
+    Description: URL con tu dominio
+    Value: !Sub https://${DomainName}
+  CustomDomainTarget:
+    Condition: HasCustomDomain
+    Description: Destino del registro CNAME que debes crear en Cloudflare (modo DNS only)
+    Value: !GetAtt ApiDomain.RegionalDomainName
+  OpsFunctionName:
+    Description: Lambda de operaciones (bootstrap / migraciones)
+    Value: !Ref OpsFunction
+  ApiFunctionName:
+    Value: !Ref ApiFunction
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  DatabaseMasterSecretArn:
+    Description: Secreto con el usuario maestro de RDS (solo lo usa la Lambda de operaciones)
+    Value: !GetAtt Database.MasterUserSecret.SecretArn

@@ -1,0 +1,50 @@
+# Configuración de AWS SAM por ambiente. Uso:
+#   sam build --build-in-source
+#   sam deploy --config-env staging
+#   sam deploy --config-env production
+# Los parámetros del dominio (DomainName, CertificateArn) se pasan con --parameter-overrides
+# (el pipeline los toma de las variables del environment de GitHub).
+version = 0.1
+
+[default.global.parameters]
+template_file = "infra/template.yaml"
+
+[default.build.parameters]
+build_in_source = true
+
+[default.validate.parameters]
+lint = true
+
+[staging.global.parameters]
+template_file = "infra/template.yaml"
+region = "us-east-1"
+
+[staging.build.parameters]
+build_in_source = true
+
+[staging.deploy.parameters]
+stack_name = "multitenant-task-api-staging"
+resolve_s3 = true
+s3_prefix = "multitenant-task-api-staging"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+fail_on_empty_changeset = false
+parameter_overrides = "Stage=staging VpcCidr=10.20.0.0/16"
+tags = "app=multitenant-task-api stage=staging"
+
+[production.global.parameters]
+template_file = "infra/template.yaml"
+region = "us-east-1"
+
+[production.build.parameters]
+build_in_source = true
+
+[production.deploy.parameters]
+stack_name = "multitenant-task-api-production"
+resolve_s3 = true
+s3_prefix = "multitenant-task-api-production"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+fail_on_empty_changeset = false
+parameter_overrides = "Stage=production VpcCidr=10.30.0.0/16"
+tags = "app=multitenant-task-api stage=production"

@@ -1,0 +1,6 @@
+.venv
+.git
+.env
+.local-secrets
+.aws-sam
+__pycache__

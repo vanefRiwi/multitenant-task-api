@@ -1,0 +1,204 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: "3.12"
+  SAM_CLI_TELEMETRY: "0"
+
+jobs:
+  # 1. Calidad de código + pruebas de integración, API y seguridad contra PostgreSQL real.
+  validate:
+    name: Lint y pruebas
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      TEST_DB_HOST: localhost
+      TEST_DB_PORT: "5432"
+      TEST_ADMIN_DB_USER: postgres
+      TEST_ADMIN_DB_PASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies (uv.lock)
+        run: uv sync --locked
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Integration tests
+        run: uv run pytest tests/integration
+
+      - name: API tests
+        run: uv run pytest tests/api
+
+      - name: Security tests
+        run: uv run pytest tests/security
+
+  # 2. Validación de la plantilla y construcción del artefacto de Lambda.
+  sam-build:
+    name: Validar y construir SAM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+      - name: Validate template
+        run: sam validate --lint --template-file infra/template.yaml --region us-east-1
+      - name: Build Lambda artifact
+        run: sam build --template-file infra/template.yaml --build-in-source
+
+  # 3. Despliegue en staging (solo al hacer merge a main y cuando AWS ya está configurado:
+  #    variable de repositorio DEPLOY_ENABLED=true, ver docs/03-setup-aws.md).
+  deploy-staging:
+    name: Desplegar en staging
+    needs: [validate, sam-build]
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write # OIDC: credenciales temporales de AWS, sin claves guardadas
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Build
+        run: sam build --template-file infra/template.yaml --build-in-source
+
+      - name: Deploy
+        run: |
+          sam deploy --config-env staging --region "${{ vars.AWS_REGION }}" \
+            --no-confirm-changeset --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              Stage=staging VpcCidr=10.20.0.0/16 \
+              DomainName="${{ vars.API_DOMAIN }}" CertificateArn="${{ vars.CERTIFICATE_ARN }}"
+
+      - name: Read stack outputs
+        id: stack
+        run: |
+          outputs() {
+            aws cloudformation describe-stacks --stack-name multitenant-task-api-staging \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
+          }
+          echo "ops=$(outputs OpsFunctionName)" >> "$GITHUB_OUTPUT"
+          echo "url=$(outputs ApiUrl)" >> "$GITHUB_OUTPUT"
+
+      - name: Controlled migrations (control_db + tenants)
+        run: |
+          scripts/invoke_ops.sh "${{ steps.stack.outputs.ops }}" '{"action": "bootstrap"}'
+          scripts/invoke_ops.sh "${{ steps.stack.outputs.ops }}" '{"action": "migrate_tenants"}'
+
+      - name: Smoke tests (multitenant completo)
+        run: |
+          BASE_URL="${{ vars.API_DOMAIN && format('https://{0}', vars.API_DOMAIN) || steps.stack.outputs.url }}"
+          uv run --no-dev --with httpx python scripts/smoke_test.py --base-url "$BASE_URL" --mode full
+
+  # 4. Producción: requiere aprobación manual (reviewers del environment "production").
+  deploy-production:
+    name: Desplegar en producción
+    needs: [deploy-staging]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Build
+        run: sam build --template-file infra/template.yaml --build-in-source
+
+      - name: Deploy
+        run: |
+          sam deploy --config-env production --region "${{ vars.AWS_REGION }}" \
+            --no-confirm-changeset --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              Stage=production VpcCidr=10.30.0.0/16 \
+              DomainName="${{ vars.API_DOMAIN }}" CertificateArn="${{ vars.CERTIFICATE_ARN }}"
+
+      - name: Read stack outputs
+        id: stack
+        run: |
+          outputs() {
+            aws cloudformation describe-stacks --stack-name multitenant-task-api-production \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
+          }
+          echo "ops=$(outputs OpsFunctionName)" >> "$GITHUB_OUTPUT"
+          echo "url=$(outputs ApiUrl)" >> "$GITHUB_OUTPUT"
+          echo "api_fn=$(outputs ApiFunctionName)" >> "$GITHUB_OUTPUT"
+
+      - name: Controlled migrations (control_db + tenants)
+        run: |
+          scripts/invoke_ops.sh "${{ steps.stack.outputs.ops }}" '{"action": "bootstrap"}'
+          scripts/invoke_ops.sh "${{ steps.stack.outputs.ops }}" '{"action": "migrate_tenants"}'
+
+      - name: Smoke tests (solo salud, sin crear datos)
+        run: |
+          BASE_URL="${{ vars.API_DOMAIN && format('https://{0}', vars.API_DOMAIN) || steps.stack.outputs.url }}"
+          uv run --no-dev --with httpx python scripts/smoke_test.py --base-url "$BASE_URL" --mode health
+
+      - name: Post-deploy check (errores de Lambda en los últimos 10 min)
+        run: |
+          START=$(date -u -d '-10 minutes' +%Y-%m-%dT%H:%M:%SZ)
+          END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          ERRORS=$(aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Errors \
+            --dimensions Name=FunctionName,Value="${{ steps.stack.outputs.api_fn }}" \
+            --start-time "$START" --end-time "$END" --period 600 --statistics Sum \
+            --query 'Datapoints[0].Sum' --output text)
+          echo "Errores de Lambda: $ERRORS"
+          if [ "$ERRORS" != "None" ] && [ "${ERRORS%.*}" -gt 0 ]; then exit 1; fi
