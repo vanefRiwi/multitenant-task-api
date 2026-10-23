@@ -13,6 +13,14 @@ Parameters:
   RepositoryName:
     Type: String
     Default: multitenant-task-api
+  # GitHub puede emitir el "sub" del token con los IDs inmutables del dueño y del repo
+  # (repo:dueño@ID/repo@ID:...). Se aceptan ambos formatos.
+  GitHubOwnerId:
+    Type: String
+    Default: "125419162"
+  RepositoryId:
+    Type: String
+    Default: "1430419753"
   CreateOidcProvider:
     Type: String
     AllowedValues: ["true", "false"]
@@ -167,7 +175,9 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOwner}/${RepositoryName}:environment:staging
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOwner}/${RepositoryName}:environment:staging
+                  - !Sub repo:${GitHubOwner}@${GitHubOwnerId}/${RepositoryName}@${RepositoryId}:environment:staging
 
   # Y este, solo los jobs del environment "production" (que exige aprobación manual).
   ProductionDeployRole:
@@ -186,7 +196,9 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOwner}/${RepositoryName}:environment:production
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOwner}/${RepositoryName}:environment:production
+                  - !Sub repo:${GitHubOwner}@${GitHubOwnerId}/${RepositoryName}@${RepositoryId}:environment:production
 
 Outputs:
   StagingDeployRoleArn:
