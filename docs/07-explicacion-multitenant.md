@@ -40,7 +40,7 @@ Piensa en un edificio de oficinas:
 | `POST /auth/login` | Se compara la contraseña con el hash y se emite un **JWT** firmado (HS256) con `sub` (id del usuario), `iat`, `exp` (60 min) e `iss`. |
 | **Authorize** | Swagger añade `Authorization: Bearer <token>` a cada petición. |
 | `POST /tenants` | 1) Se registra la organización en `control_db.tenants` como `provisioning` y al creador como `owner`. 2) Con un usuario de PostgreSQL especial (`tenant_provisioner`, que no es superusuario) se crea un **rol** y una **base de datos** nuevos para esa organización, cerrada a todos los demás. 3) La contraseña de ese rol se guarda en **Secrets Manager**. 4) Se aplican las migraciones (la tabla `tasks`). 5) Estado `active` → **201**. |
-| `POST /tenants/{id}/tasks` | Ver el recorrido de 7.3. La tarea se guarda en la base de esa organización, en una tabla `tasks` que **no tiene columna `tenant_id`**: no la necesita, porque la base entera es de una sola organización. |
+| `POST /tenants/{id}/tasks` | Ver el recorrido de 7.4. La tarea se guarda en la base de esa organización, en una tabla `tasks` que **no tiene columna `tenant_id`**: no la necesita, porque la base entera es de una sola organización. |
 | Beto pide algo de Acme | El paso de membresía falla y responde **404** antes de tocar la base de Acme. |
 | Ana quita a Beto | Se borra la fila de `memberships`. La próxima petición de Beto ya falla, aunque su token no haya caducado. |
 
