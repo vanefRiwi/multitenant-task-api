@@ -399,6 +399,6 @@ sam delete --stack-name multitenant-task-api-staging --region us-east-1
 | `ReservedConcurrentExecutions … decreases account's UnreservedConcurrentExecution below its minimum` | Cuenta nueva con límite de 10 | Deja `LambdaReservedConcurrency=0` o pide más en **Service Quotas** → Lambda → *Concurrent executions* |
 | `invoke_ops.sh` termina con *FunctionError* | Falló bootstrap o una migración | Mira los logs de `OpsFunction` en CloudWatch |
 | `/health/ready` da 503 | Bootstrap sin ejecutar o RDS arrancando | Paso 7; espera a que RDS esté *Available* |
-| Error 403/`Not authorized to perform sts:AssumeRoleWithWebIdentity` en Actions | El *sub* del token no coincide | El job debe tener `environment: staging/production`, y `GitHubOwner`/`RepositoryName` deben coincidir exactamente (mayúsculas incluidas) |
+| Error 403/`Not authorized to perform sts:AssumeRoleWithWebIdentity` en Actions | El *sub* del token no coincide | El job debe tener `environment: staging/production`, y `GitHubOwner`/`RepositoryName` deben coincidir exactamente (mayúsculas incluidas). Si en CloudTrail (*Event history* → `AssumeRoleWithWebIdentity`) el `userName` trae IDs (`repo:dueño@123/repo@456:…`), revisa `GitHubOwnerId`/`RepositoryId` del stack OIDC |
 | `curl` al dominio da error de certificado | El CNAME tiene el proxy activo o aún no propaga | Nube gris y espera unos minutos |
 | *AccessDenied* en el pipeline al crear algo nuevo | La política `multitenant-task-api-deploy` no cubre ese servicio | Añade la acción a `infra/github-oidc.yaml` y vuelve a desplegar ese stack |
