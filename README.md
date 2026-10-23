@@ -17,9 +17,10 @@ Está escrita para alguien que **nunca ha hecho esto**, en orden:
 | 1 | [Arquitectura y código](docs/01-arquitectura.md) | Cómo está organizado el proyecto, qué hace cada capa y cómo viaja una petición |
 | 2 | [Desarrollo local](docs/02-desarrollo-local.md) | Instalar herramientas, levantar la API en tu máquina y correr las pruebas |
 | 3 | [Setup en AWS paso a paso](docs/03-setup-aws.md) | Cuenta, IAM, RDS, Secrets Manager, SAM, OIDC, ACM, API Gateway y Cloudflare |
-| 4 | [Probar que el multitenant funciona](docs/04-probar-multitenant.md) | Dos usuarios, dos organizaciones y verificación del aislamiento, en local y en AWS |
+| 4 | [Probar que el multitenant funciona](docs/04-probar-multitenant.md) | Dos usuarios, dos organizaciones y verificación del aislamiento, desde Swagger o con curl, en local y en AWS |
 | 5 | [OAuth con Google y GitHub](docs/05-oauth-google-github.md) | Qué tendrías que hacer y si conviene en este MVP |
 | 6 | [Preguntas frecuentes y decisiones](docs/06-preguntas-y-decisiones.md) | Unit testing, RDS Proxy, costes y otras decisiones |
+| 7 | [Cómo funciona el multitenant (para explicarlo)](docs/07-explicacion-multitenant.md) | Qué pasa por dentro, buenas prácticas y guion de presentación |
 
 ## Arranque rápido (local)
 
