@@ -162,15 +162,91 @@ Vuelve a autorizar a Beto con su token correcto para seguir.
 > el `owner` gestiona miembros. Si quisieras que un `member` no pudiera borrar, sería una
 > regla más en el caso de uso `DeleteTask`.
 
-### A8. Dónde verlo en AWS (consola web)
+### A8. Ver en AWS que cada organización tiene su propia base de datos
 
-- **Secrets Manager** (región us-east-1): un secreto por organización,
-  `multitenant-task-api/staging/tenants/tenant_<id>`. *Retrieve secret value* muestra que su
-  `dbname` y `username` son los de esa organización y de ninguna otra.
-- **CloudWatch → Log groups** → el de `ApiFunction`: verás líneas como
-  `GET /api/v1/tenants/<id>/tasks -> 404 (9.0 ms) request_id=...`, y ninguna contraseña ni
-  token. El `request_id` es el mismo que devuelve la API en los errores, así puedes buscar
-  una petición concreta.
+La base de datos (RDS) está en una red privada, así que no puedes abrirla desde tu
+computadora. Hay tres formas de verlo desde la consola web, de la más directa a la más
+indirecta. Usa la región **us-east-1 (N. Virginia)**.
+
+**1. Preguntárselo a la propia base de datos (Lambda de operaciones).** Es la prueba
+directa: lista las bases que existen en RDS y entra en cada una con su propio usuario.
+
+1. Consola de AWS → **Lambda** → **Functions** → abre la que se llama
+   `multitenant-task-api-staging-OpsFunction-…`.
+2. Pestaña **Test** → *Create new event* → nombre `inspeccionar` → en *Event JSON* pega:
+
+   ```json
+   { "action": "inspect_tenants" }
+   ```
+
+3. Pulsa **Test**. En *Execution result* → *Details* verás algo así (resumido):
+
+   ```json
+   {
+     "bases_de_datos_en_rds": [
+       "control_db",
+       "tenant_9ff1b20c8bb5471198d52b1543e1fe55",
+       "tenant_d8c790d72edc44ac89fbe21fcecc4b77"
+     ],
+     "tenants_en_control_db": [
+       {
+         "name": "Acme", "slug": "acme-1", "status": "active",
+         "database_name": "tenant_d8c790d72edc44ac89fbe21fcecc4b77",
+         "secret_arn": "arn:aws:secretsmanager:us-east-1:…:secret:multitenant-task-api/staging/tenants/tenant_d8c7…",
+         "base_existe": true,
+         "conectado_como": "tenant_d8c790d72edc44ac89fbe21fcecc4b77",
+         "tareas": 1, "titulos": ["Plan secreto de Acme"]
+       },
+       {
+         "name": "Globex", "slug": "globex-1", "status": "active",
+         "database_name": "tenant_9ff1b20c8bb5471198d52b1543e1fe55",
+         "conectado_como": "tenant_9ff1b20c8bb5471198d52b1543e1fe55",
+         "tareas": 1, "titulos": ["Plan de Globex"]
+       }
+     ],
+     "prueba_cruzada": {
+       "usuario": "tenant_d8c790d72edc44ac89fbe21fcecc4b77",
+       "intenta_abrir": "tenant_9ff1b20c8bb5471198d52b1543e1fe55",
+       "resultado": "acceso denegado por PostgreSQL"
+     }
+   }
+   ```
+
+   Cómo leerlo:
+   - `bases_de_datos_en_rds`: las bases que **de verdad** existen en el servidor: la central
+     y una `tenant_<id>` por organización (el id es el de la organización, sin guiones).
+   - `tenants_en_control_db`: lo que guarda la tabla `tenants` del enunciado
+     (`database_name`, `secret_arn`, `status`) y, para cada una, lo que hay dentro de **su**
+     base: cuántas tareas tiene y sus títulos. La tarea de Acme solo aparece en la base de
+     Acme.
+   - `conectado_como`: para leer cada base se usó el usuario de PostgreSQL **de esa
+     organización**, sacado de su secreto.
+   - `prueba_cruzada`: con el usuario de una organización se intenta abrir la base de otra, y
+     PostgreSQL lo rechaza.
+
+   Es una acción de solo lectura: no cambia nada y nunca muestra contraseñas. El smoke test
+   del pipeline también crea organizaciones (slugs `acme-<código>` y `globex-<código>`), así
+   que verás más de las que creaste tú.
+
+**2. Secrets Manager: un secreto por organización.** Consola → **Secrets Manager** →
+*Secrets*. Además de los secretos del sistema verás uno por organización:
+`multitenant-task-api/staging/tenants/tenant_<id>`. Ábrelo → **Retrieve secret value**:
+`dbname` y `username` son los de esa organización y de ninguna otra. Es la referencia que
+guarda la columna `secret_arn`.
+
+**3. CloudWatch: el registro de la creación.** Consola → **CloudWatch** → *Log groups* →
+`/aws/lambda/multitenant-task-api-staging-ApiFunction-…` → *Search all log streams* y busca
+`aprovisionado`. Por cada organización creada verás:
+
+```
+Base de datos del tenant <id> lista
+Tenant <id> aprovisionado
+POST /api/v1/tenants -> 201
+```
+
+En ese mismo grupo verás las peticiones de Beto con `-> 404` y ninguna contraseña ni token.
+El `request_id` es el mismo que devuelve la API en los errores, así puedes buscar una
+petición concreta.
 
 ---
 

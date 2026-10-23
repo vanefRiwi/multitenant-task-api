@@ -20,7 +20,19 @@ Piensa en un edificio de oficinas:
   antes de darte la llave. Si te quitan de la lista, la siguiente vez ya no entras, aunque tu
   carné siga vigente.
 
-## 7.2. Qué ocurre en cada paso de la prueba
+## 7.2. Qué pide el enunciado y dónde se ve
+
+| El enunciado dice | Cómo quedó | Dónde verlo |
+|-------------------|-----------|-------------|
+| "Una base de datos PostgreSQL independiente por tenant" (secciones 1 y 16) | Cada organización tiene su base `tenant_<id>` | Lambda de operaciones, acción `inspect_tenants` ([04, A8](04-probar-multitenant.md#a8-ver-en-aws-que-cada-organización-tiene-su-propia-base-de-datos)) |
+| "Las bases de los tenants podrán residir en una misma instancia de RDS" (sección 4) | Todas están en la misma instancia RDS de staging, cada una separada | `bases_de_datos_en_rds` en `inspect_tenants` |
+| `control_db` con `users`, `tenants` y `memberships`; `tenants` guarda `database_name` y `secret_arn`, no la contraseña (5.1) | Igual; la API nunca devuelve esos dos campos | `tenants_en_control_db` en `inspect_tenants` |
+| Cada base de tenant tiene `tasks` sin columna `tenant_id` (5.2) | Igual: la base entera es de una organización | `tareas` y `titulos` por base en `inspect_tenants` |
+| Crear organización: `provisioning` → `owner` → crear base con componente restringido → secreto → migraciones → `active` (7.2) | Igual (`CreateTenant` + `PostgresTenantProvisioner`) | Respuesta `201` con `status: active`; logs "Base de datos del tenant … lista" en CloudWatch |
+| Credenciales en Secrets Manager (4) y usuarios de PostgreSQL con permisos mínimos (8) | Un secreto y un usuario por organización | Secrets Manager → `multitenant-task-api/staging/tenants/…`; `prueba_cruzada` en `inspect_tenants` |
+| El backend no confía en el `tenant_id` del cliente; tenant activo y membresía en cada petición (8) | `ResolveTenant` en cada petición | Pruebas A5–A7 de la guía 04 |
+
+## 7.3. Qué ocurre en cada paso de la prueba
 
 | Lo que haces en Swagger | Lo que pasa por dentro |
 |-------------------------|------------------------|
@@ -32,7 +44,7 @@ Piensa en un edificio de oficinas:
 | Beto pide algo de Acme | El paso de membresía falla y responde **404** antes de tocar la base de Acme. |
 | Ana quita a Beto | Se borra la fila de `memberships`. La próxima petición de Beto ya falla, aunque su token no haya caducado. |
 
-## 7.3. El recorrido de una petición
+## 7.4. El recorrido de una petición
 
 `GET /api/v1/tenants/{tenant_id}/tasks` con un token:
 
@@ -54,7 +66,7 @@ El código de estos pasos: `presentation/http/dependencies.py` (`get_current_use
 `get_tenant_access`, `get_tenant_session`), `application/tenants/resolve_tenant.py` e
 `infrastructure/tenancy/tenant_database_factory.py`.
 
-## 7.4. Los códigos de respuesta y por qué
+## 7.5. Los códigos de respuesta y por qué
 
 | Código | Cuándo | Por qué así |
 |--------|--------|-------------|
@@ -69,7 +81,7 @@ Todos los errores tienen la misma forma: `{"error": {"code", "message", "request
 sin trazas, SQL ni nombres de bases. El `request_id` permite encontrar la petición en
 CloudWatch.
 
-## 7.5. Buenas prácticas aplicadas
+## 7.6. Buenas prácticas aplicadas
 
 **Aislamiento**
 
@@ -106,7 +118,7 @@ CloudWatch.
   (`tests/security/`), en cada pull request; despliegue con GitHub Actions usando **OIDC**
   (sin claves de AWS guardadas en GitHub), con staging antes que producción.
 
-## 7.6. Guion para presentarlo (5–7 minutos)
+## 7.7. Guion para presentarlo (5–7 minutos)
 
 1. **El problema (30 s).** "Construí una API de tareas para varias empresas. El requisito
    principal es que ninguna empresa pueda ver los datos de otra, ni por error ni a
@@ -134,7 +146,7 @@ CloudWatch.
    despliegue con GitHub Actions y OIDC. "Como siguiente paso: login con Google/GitHub y
    límite de intentos de login."
 
-## 7.7. Preguntas que te pueden hacer
+## 7.8. Preguntas que te pueden hacer
 
 - **¿Por qué no una columna `tenant_id` en una sola base?** Es más simple y escala a más
   clientes, pero un solo `WHERE` olvidado expone datos de otra empresa. Con una base por

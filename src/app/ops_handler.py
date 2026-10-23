@@ -8,6 +8,7 @@ Acciones:
 - migrate_tenants: migraciones de tenant en todas las organizaciones activas.
 - provision_tenant: reintenta la provisión de {"tenant_id": "..."}.
 - status: revisión actual vs. head (central).
+- inspect_tenants: solo lectura; lista las bases de tenant y cuántas tareas tiene cada una.
 """
 
 import logging
@@ -19,6 +20,7 @@ from app.config.settings import get_settings
 from app.infrastructure.container import build_secret_provider
 from app.infrastructure.database.migrations import head_revision
 from app.infrastructure.ops.bootstrap import bootstrap_control_plane
+from app.infrastructure.ops.inspect_tenants import inspect_tenants
 from app.infrastructure.ops.provisioning import retry_tenant_provisioning
 from app.infrastructure.ops.tenant_migrations import migrate_all_tenants
 
@@ -48,4 +50,6 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         return retry_tenant_provisioning(settings, secrets, UUID(str(event["tenant_id"])))
     if action == "status":
         return {"central_head": head_revision("central"), "tenant_head": head_revision("tenant")}
+    if action == "inspect_tenants":
+        return inspect_tenants(settings, secrets)
     raise ValueError(f"Acción desconocida: {action!r}")
